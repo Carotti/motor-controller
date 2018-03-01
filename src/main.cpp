@@ -43,9 +43,9 @@ const int8_t lead = 2;  //2 for forwards, -2 for backwards
 DigitalOut led1(LED1);
 
 //Photointerrupter inputs
-DigitalIn I1(I1pin);
-DigitalIn I2(I2pin);
-DigitalIn I3(I3pin);
+InterruptIn I1(I1pin);
+InterruptIn I2(I2pin);
+InterruptIn I3(I3pin);
 
 //Motor Drive outputs
 DigitalOut L1L(L1Lpin);
@@ -93,11 +93,28 @@ int8_t motorHome() {
     return readRotorState();
 }
 
+void setMotor(int offset) {
+    static int rotation = 0;
+    rotation += offset;
+    int8_t intState = stateMap[rotation];
+    motorOut((intState-0+lead+6)%6);
+}
+
+void rotor1Interrupt() {
+    setMotor(1);
+}
+
+void rotor2Interrupt() {
+    setMotor(2);
+}
+
+void rotor3Interrupt() {
+    setMotor(4);
+}
+
 //Main
 int main() {
     int8_t orState = 0;    //Rotot offset at motor state 0
-    int8_t intState = 0;
-    int8_t intStateOld = 0;
 
     //Initialise the serial port
     Serial pc(SERIAL_TX, SERIAL_RX);
@@ -108,12 +125,12 @@ int main() {
     pc.printf("Rotor origin: %x\n\r",orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
 
+    I1.rise(&rotor1Interrupt);
+    I2.rise(&rotor2Interrupt);
+    I3.rise(&rotor3Interrupt);
+
     //Poll the rotor state and set the motor outputs accordingly to spin the motor
     while (1) {
-        intState = readRotorState();
-        if (intState != intStateOld) {
-            intStateOld = intState;
-            motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
-        }
+
     }
 }
