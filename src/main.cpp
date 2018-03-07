@@ -1,4 +1,5 @@
 #include "mbed.h"
+#include "rtos.h"
 #include "hash/SHA256.h"
 
 //Photointerrupter input pins
@@ -53,9 +54,12 @@ uint8_t sequence[] = {  0x45,0x6D,0x62,0x65,0x64,0x64,0x65,0x64,
 
 uint64_t* key = (uint64_t*)((int)sequence + 48);
 
-uint64_t* nonce = (uint64_t*)((int)sequence + 56);
+uint64_t* nonce = (uint64_t*)((int)sequence + 56); // LITTLE ENDIAN!!
 
 uint8_t hash[32];
+
+volatile uint64_t newKey;
+Mutex newKey_mutex;
 
 //Status LED
 DigitalOut led1(LED1);
@@ -72,6 +76,99 @@ DigitalOut L2L(L2Lpin);
 DigitalOut L2H(L2Hpin);
 DigitalOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
+
+typedef struct {
+    uint8_t code;
+    uint32_t data;
+} message_t;
+
+Mail<message_t, 16> outMessages;
+
+typedef enum {
+    hello,
+    rotorOrigin,
+    nonceFoundFirst, // First half of the nonce data
+    nonceFoundSecond, // Second half of the nonce data
+    hashRate
+} messageTypes;
+
+Thread commOutT;
+Thread commDecodeT;
+
+Queue<void, 8> inCharQ;
+
+//Initialise the serial port
+RawSerial pc(SERIAL_TX, SERIAL_RX);
+
+void putMessage(uint8_t code, uint32_t data) {
+    message_t* msg = outMessages.alloc();
+    msg->code = code;
+    msg->data = data;
+    outMessages.put(msg);
+}
+
+void commOutFn() {
+    while(1) {
+        osEvent newEvent = outMessages.get();
+        message_t* pMsg = (message_t*) newEvent.value.p;
+        switch(pMsg->code) {
+            case hello:
+                pc.printf("Hello\n\r");
+                break;
+            case rotorOrigin:
+                pc.printf("Rotor origin: %d\n\r", pMsg->data);
+                break;
+            case nonceFoundFirst:
+                pc.printf("Nonce found: 0x%08x", pMsg->data);
+                break;
+            case nonceFoundSecond:
+                pc.printf("%08x\n\r", pMsg->data);
+                break;
+            case hashRate:
+                pc.printf("Hash rate is: %d #/s\n\r", pMsg->data);
+                break;
+        }
+        outMessages.free(pMsg);
+    }
+}
+
+void serialISR() {
+    uint8_t newChar = pc.getc();
+    inCharQ.put((void*)newChar);
+}
+
+void processCommand(uint8_t* command) {
+    switch (command[0]) {
+        case 'K':
+            newKey_mutex.lock();
+            sscanf((char*)command, "K%x", &newKey);
+            newKey_mutex.unlock();
+            break;
+        case 'R':
+            break;
+        case 'V':
+            break;
+    }
+}
+
+void commDecodeFn() {
+    pc.attach(&serialISR);
+    uint8_t commandArr[128];
+    unsigned charNo = 0;
+    while(1) {
+        osEvent newEvent = inCharQ.get();
+        uint8_t newChar = (uint8_t) newEvent.value.p;
+        if (newChar == '\r') {
+            commandArr[charNo] = '\0';
+            charNo = 0;
+            processCommand(commandArr);
+        }
+        else
+        {
+            commandArr[charNo++] = newChar;
+        }
+    }
+}
 
 //Set a given drive state
 void motorOut(int8_t driveState){
@@ -127,13 +224,14 @@ void photoISR() {
 
 //Main
 int main() {
-    //Initialise the serial port
-    Serial pc(SERIAL_TX, SERIAL_RX);
-    pc.printf("Hello\n\r");
+    commOutT.start(commOutFn);
+    commDecodeT.start(commDecodeFn);
+
+    putMessage(hello, 0);
 
     //Run the motor synchronisation
     orState = motorHome();
-    pc.printf("Rotor origin: %x\n\r",orState);
+    putMessage(rotorOrigin, orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
 
     // Attach the photointerruptors to the service routine
@@ -151,19 +249,23 @@ int main() {
     hashTimer.start();
 
     while (1) {
+        newKey_mutex.lock();
+        *key = newKey;
+        newKey_mutex.unlock();
+
         sha.computeHash(hash, sequence, 64);
         numHashes++;
 
         if (hash[0] == 0 && hash[1] == 0) {
             // Successful hash
-            pc.printf("Successful nonce found: 0x%x\n\r", nonce);
-            *nonce = 0;
+            putMessage(nonceFoundFirst, (uint32_t)(*nonce >> 32));
+            putMessage(nonceFoundSecond, (uint32_t)(*nonce));
         } else {
             (*nonce)++;
         }
 
         if (hashTimer.read() > 1.0f) {
-            pc.printf("Hash rate is: %d #/s\n\r", numHashes);
+            putMessage(hashRate, numHashes);
             numHashes = 0;
             hashTimer.reset();
         }
