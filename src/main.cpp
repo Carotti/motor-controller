@@ -39,6 +39,8 @@ const int8_t stateMap[] = {0x07,0x05,0x03,0x04,0x01,0x00,0x02,0x07};
 //Phase lead to make motor spin
 const int8_t lead = 2;  //2 for forwards, -2 for backwards
 
+int orState = 0;
+
 //Status LED
 DigitalOut led1(LED1);
 
@@ -78,10 +80,12 @@ void motorOut(int8_t driveState){
     if (driveOut & 0x20) L3H = 0;
     }
 
+int rotorState;
+
     //Convert photointerrupter inputs to a rotor state
 inline int8_t readRotorState(){
     return stateMap[I1 + 2*I2 + 4*I3];
-    }
+}
 
 //Basic synchronisation routine
 int8_t motorHome() {
@@ -93,29 +97,27 @@ int8_t motorHome() {
     return readRotorState();
 }
 
-void setMotor(int offset) {
-    static int rotation = 0;
-    rotation += offset;
-    int8_t intState = stateMap[rotation];
-    motorOut((intState-0+lead+6)%6);
-}
+// Photointerruptor service routine
+// change gives how much the photointerrupor states have changed
+// I1 rising = 1
+// I1 falling = -1
+// I2 rising = 2
+// I2 falling = -2
+// I3 rising = 4
+// I3 falling = -4
+void photoISR() {
+    int8_t intState = 0;
+    int8_t intStateOld = 0;
 
-void rotor1Interrupt() {
-    setMotor(1);
-}
-
-void rotor2Interrupt() {
-    setMotor(2);
-}
-
-void rotor3Interrupt() {
-    setMotor(4);
+    intState = readRotorState();
+    if (intState != intStateOld) {
+        intStateOld = intState;
+        motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
+    }
 }
 
 //Main
 int main() {
-    int8_t orState = 0;    //Rotot offset at motor state 0
-
     //Initialise the serial port
     Serial pc(SERIAL_TX, SERIAL_RX);
     pc.printf("Hello\n\r");
@@ -125,11 +127,13 @@ int main() {
     pc.printf("Rotor origin: %x\n\r",orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
 
-    I1.rise(&rotor1Interrupt);
-    I2.rise(&rotor2Interrupt);
-    I3.rise(&rotor3Interrupt);
+    I1.rise(&photoISR);
+    I1.fall(&photoISR);
+    I2.rise(&photoISR);
+    I2.fall(&photoISR);
+    I3.rise(&photoISR);
+    I3.fall(&photoISR);
 
-    //Poll the rotor state and set the motor outputs accordingly to spin the motor
     while (1) {
 
     }
