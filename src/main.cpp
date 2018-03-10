@@ -74,11 +74,11 @@ InterruptIn I2(I2pin);
 InterruptIn I3(I3pin);
 
 //Motor Drive outputs
-PWMOut L1L(L1Lpin);
+PwmOut L1L(L1Lpin);
 DigitalOut L1H(L1Hpin);
-PWMOut L2L(L2Lpin);
+PwmOut L2L(L2Lpin);
 DigitalOut L2H(L2Hpin);
-PWMOut L3L(L3Lpin);
+PwmOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
 
 typedef struct {
@@ -93,12 +93,13 @@ typedef enum {
     rotorOrigin,
     nonceFoundFirst, // First half of the nonce data
     nonceFoundSecond, // Second half of the nonce data
-    hashRate
+    hashRate,
+    velo
 } messageTypes;
 
 Thread commOutT;
 Thread commDecodeT;
-Thread calcVeloT;
+Thread calcVeloT; //Thread for calculating velocity
 
 Queue<void, 8> inCharQ;
 
@@ -132,6 +133,9 @@ void commOutFn() {
             case hashRate:
                 pc.printf("Hash rate is: %d #/s\n\r", pMsg->data);
                 break;
+            case velo:
+                pc.printf("Speed of motor is: %d rev/s\n\r", pMsg->data); //TODO IS THIS CORRECT?
+                break;
         }
         outMessages.free(pMsg);
     }
@@ -153,7 +157,7 @@ void processCommand(uint8_t* command) {
             break;
         case 'V':
             break;
-        case 'T':
+        case 'T': //Set up for testing of setting the torque for the motor manually
             sscanf((char*)command, "T%x", &torque);
             break;
     }
@@ -199,11 +203,11 @@ void motorOut(int8_t driveState, uint32_t t){
     if (driveOut & 0x08) L2H = 0;
     if (driveOut & 0x10) L3L.pulsewidth_us(t);
     if (driveOut & 0x20) L3H = 0;
-    }
+}
 
 int rotorState;
 
-    //Convert photointerrupter inputs to a rotor state
+//Convert photointerrupter inputs to a rotor state
 inline int8_t readRotorState(){
     return stateMap[I1 + 2*I2 + 4*I3];
 }
@@ -226,11 +230,13 @@ void photoISR() {
 
     intState = readRotorState();
 
-    if ((intState == 7 && intStateOld == 0) || (intState < intStateOld && !(intState == 0 && intStateOld == 7))){
-      counter--; //TODO Reset counter??
+    if ((intState == 7 && intStateOld == 0) || (intState < intStateOld && !(intState == 0 && intStateOld == 7))) {
+      //We have to check for 'overflow' in the states
+      counter--;
     }
-    else if (intState > intStateOld || (intState == 0 && intStateOld == 7)){
-      counter++; //TODO Reset counter??
+    else if (intState > intStateOld || (intState == 0 && intStateOld == 7)) {
+      //Same thing as before here
+      counter++;
     }
 
     if (intState != intStateOld) {
@@ -242,8 +248,8 @@ void photoISR() {
 void calcVelo(){
   static uint8_t print;
   while(1){
-    calcVeloT.signal_wait(0x1);
-    //TODO Read position, calculate velocity and print them to the outputs
+    calcVeloT.signal_wait(0x1); //Wait for ticker to send signal to calculate speed.
+    //TODO Make more accurate counter (See spec) (And maybe make velo speed message average of last 10 readings?)
     int16_t speed = counter*10/6; //Multiply by 10 because of ticker and divide by 6 to get in revolutions.
     counter = 0;
     print++;
@@ -251,8 +257,6 @@ void calcVelo(){
       print = 0;
       putMessage(velo, int32_t(speed));
     }
-
-    calcVeloT.signal_set(0x0);
   }
 }
 
