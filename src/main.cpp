@@ -61,6 +61,10 @@ uint8_t hash[32];
 volatile uint64_t newKey;
 Mutex newKey_mutex;
 
+//Speed and Torque Variables
+volatile uint32_t torque;
+int16_t counter;
+
 //Status LED
 DigitalOut led1(LED1);
 
@@ -70,11 +74,11 @@ InterruptIn I2(I2pin);
 InterruptIn I3(I3pin);
 
 //Motor Drive outputs
-DigitalOut L1L(L1Lpin);
+PWMOut L1L(L1Lpin);
 DigitalOut L1H(L1Hpin);
-DigitalOut L2L(L2Lpin);
+PWMOut L2L(L2Lpin);
 DigitalOut L2H(L2Hpin);
-DigitalOut L3L(L3Lpin);
+PWMOut L3L(L3Lpin);
 DigitalOut L3H(L3Hpin);
 
 typedef struct {
@@ -94,6 +98,7 @@ typedef enum {
 
 Thread commOutT;
 Thread commDecodeT;
+Thread calcVeloT;
 
 Queue<void, 8> inCharQ;
 
@@ -148,6 +153,9 @@ void processCommand(uint8_t* command) {
             break;
         case 'V':
             break;
+        case 'T':
+            sscanf((char*)command, "T%x", &torque);
+            break;
     }
 }
 
@@ -171,25 +179,25 @@ void commDecodeFn() {
 }
 
 //Set a given drive state
-void motorOut(int8_t driveState){
+void motorOut(int8_t driveState, uint32_t t){
 
     //Lookup the output byte from the drive state.
     int8_t driveOut = driveTable[driveState & 0x07];
 
     //Turn off first
-    if (~driveOut & 0x01) L1L = 0;
+    if (~driveOut & 0x01) L1L.pulsewidth_us(0);
     if (~driveOut & 0x02) L1H = 1;
-    if (~driveOut & 0x04) L2L = 0;
+    if (~driveOut & 0x04) L2L.pulsewidth_us(0);
     if (~driveOut & 0x08) L2H = 1;
-    if (~driveOut & 0x10) L3L = 0;
+    if (~driveOut & 0x10) L3L.pulsewidth_us(0);
     if (~driveOut & 0x20) L3H = 1;
 
     //Then turn on
-    if (driveOut & 0x01) L1L = 1;
+    if (driveOut & 0x01) L1L.pulsewidth_us(t);
     if (driveOut & 0x02) L1H = 0;
-    if (driveOut & 0x04) L2L = 1;
+    if (driveOut & 0x04) L2L.pulsewidth_us(t);
     if (driveOut & 0x08) L2H = 0;
-    if (driveOut & 0x10) L3L = 1;
+    if (driveOut & 0x10) L3L.pulsewidth_us(t);
     if (driveOut & 0x20) L3H = 0;
     }
 
@@ -203,7 +211,7 @@ inline int8_t readRotorState(){
 //Basic synchronisation routine
 int8_t motorHome() {
     //Put the motor in drive state 0 and wait for it to stabilise
-    motorOut(0);
+    motorOut(0, 256);
     wait(2.0);
 
     //Get the rotor state
@@ -215,17 +223,53 @@ void photoISR() {
     int8_t intState = 0;
     int8_t intStateOld = 0;
 
+
     intState = readRotorState();
+
+    if ((intState == 7 && intStateOld == 0) || (intState < intStateOld && !(intState == 0 && intStateOld == 7))){
+      counter--; //TODO Reset counter??
+    }
+    else if (intState > intStateOld || (intState == 0 && intStateOld == 7)){
+      counter++; //TODO Reset counter??
+    }
+
     if (intState != intStateOld) {
         intStateOld = intState;
-        motorOut((intState-orState+lead+6)%6); //+6 to make sure the remainder is positive
+        motorOut((intState-orState+lead+6)%6, torque); //+6 to make sure the remainder is positive
     }
+}
+
+void calcVelo(){
+  static uint8_t print;
+  while(1){
+    calcVeloT.signal_wait(0x1);
+    //TODO Read position, calculate velocity and print them to the outputs
+    int16_t speed = counter*10/6; //Multiply by 10 because of ticker and divide by 6 to get in revolutions.
+    counter = 0;
+    print++;
+    if (print == 9){
+      print = 0;
+      putMessage(velo, int32_t(speed));
+    }
+
+    calcVeloT.signal_set(0x0);
+  }
+}
+
+void sigCalcVelo(){
+  calcVeloT.signal_set(0x1);
 }
 
 //Main
 int main() {
     commOutT.start(commOutFn);
     commDecodeT.start(commDecodeFn);
+    calcVeloT.start(calcVelo);
+    L1L.period_us(256);
+    L2L.period_us(256);
+    L3L.period_us(256);
+
+    counter = 0;
 
     putMessage(hello, 0);
 
@@ -247,6 +291,8 @@ int main() {
     Timer hashTimer;
 
     hashTimer.start();
+    Ticker t;
+    t.attach(&sigCalcVelo, 0.1);
 
     while (1) {
         newKey_mutex.lock();
