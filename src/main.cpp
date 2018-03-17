@@ -23,9 +23,14 @@
 #define PERIOD 2000
 
 // Proportional constant for setting speed control
+<<<<<<< HEAD
 #define Kp 75
 #define Krp 5
 #define Krd 20
+=======
+#define Kp 25
+
+>>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
 #define MAXCOMMANDLEN 128
 //Mapping from sequential drive states to motor phase outputs
 /*
@@ -66,6 +71,7 @@ uint8_t hash[32];
 volatile uint64_t newKey;
 Mutex newKey_mutex;
 Mutex counter_mutex;
+<<<<<<< HEAD
 
 //Speed and Torque Variables
 volatile int16_t counter;
@@ -75,6 +81,16 @@ volatile int32_t newTorque;
 volatile int32_t desiredRotation;
 volatile int32_t rotation = 0;
 
+=======
+Mutex torque_mutex;
+Mutex newTorque_mutex;
+
+//Speed and Torque Variables
+volatile uint32_t torque = 500;
+volatile int16_t counter;
+volatile uint16_t desiredSpeed;
+volatile float newTorque;
+>>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
 
 //Status LED
 DigitalOut led1(LED1);
@@ -151,6 +167,9 @@ void commOutFn() {
             case dbg:
                 pc.printf("Debug Number: %d\n\r", pMsg->data);
                 break;
+            case dbg:
+                pc.printf("Debug Number: %d\n\r", pMsg->data);
+                break;
         }
         outMessages.free(pMsg);
     }
@@ -175,10 +194,18 @@ void processCommand(uint8_t* command) {
             desiredRotation = rotation + (rotationAmt * 6);
             break;
         case 'V':
+<<<<<<< HEAD
             sscanf((char*)command, "V%f", &desiredSpeed);
             if (desiredSpeed == 0) {
                 desiredSpeed = 200; //very high
             }
+=======
+            sscanf((char*)command, "V%d", &desiredSpeed);
+            break;
+        case 'T': //Set up for testing of setting the torque for the motor manually
+            sscanf((char*)command, "T%x", &torque);
+            putMessage(dbg, torque);
+>>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
             break;
     }
 }
@@ -195,6 +222,10 @@ void commDecodeFn() {
                 charNo = 0;
             }
             if (newChar == '\r') {
+<<<<<<< HEAD
+=======
+                // putMessage(dbg, 69);
+>>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
                 commandArr[charNo] = '\0';
                 charNo = 0;
                 processCommand(commandArr);
@@ -255,6 +286,7 @@ void photoISR() {
 
     intState = readRotorState();
 
+<<<<<<< HEAD
     int8_t lead = 2;
     uint32_t torque;
 
@@ -288,6 +320,27 @@ void photoISR() {
     counter = newCounter;
     counter_mutex.unlock();
 
+=======
+    motorOut((intState-orState+lead+6)%6, torque); //+6 to make sure the remainder is positive
+    /*
+    if(newTorque < 0){
+        lead = -2;
+        torque = abs(newTorque);
+    }
+
+    */
+
+    if (intState - intStateOld == 5) {
+        //We have to check for 'overflow' in the states
+        counter--;
+    } else if (intState - intStateOld == -5){
+        //Same thing as before here
+        counter++;
+    } else{
+        counter+=(intState-intStateOld);
+    }
+
+>>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
     intStateOld = intState;
 }
 
@@ -386,7 +439,6 @@ int main() {
             // Successful hash
             putMessage(nonceFoundFirst, (uint32_t)(*nonce >> 32));
             putMessage(nonceFoundSecond, (uint32_t)(*nonce));
-            (*nonce) = 0;
         }
         (*nonce)++;
 
