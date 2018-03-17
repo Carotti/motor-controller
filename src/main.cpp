@@ -269,9 +269,9 @@ int main() {
     commOutT.start(commOutFn);
     commDecodeT.start(commDecodeFn);
     calcVeloT.start(calcVelo);
-    L1L.period_us(256);
-    L2L.period_us(256);
-    L3L.period_us(256);
+    L1L.period_us(2000);
+    L2L.period_us(2000);
+    L3L.period_us(2000);
 
     counter = 0;
 
