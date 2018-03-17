@@ -19,6 +19,14 @@
 #define L3Lpin D9           //0x10
 #define L3Hpin D10          //0x20
 
+// PwmOut Period
+#define PERIOD 2000
+
+// Proportional constant for setting speed control
+#define Kp 75
+#define Krp 5
+#define Krd 20
+#define MAXCOMMANDLEN 128
 //Mapping from sequential drive states to motor phase outputs
 /*
 State   L1  L2  L3
@@ -37,9 +45,6 @@ const int8_t driveTable[] = {0x12,0x18,0x09,0x21,0x24,0x06,0x00,0x00};
 //Mapping from interrupter inputs to sequential rotor states. 0x00 and 0x07 are not valid
 const int8_t stateMap[] = {0x07,0x05,0x03,0x04,0x01,0x00,0x02,0x07};
 //const int8_t stateMap[] = {0x07,0x01,0x03,0x02,0x05,0x00,0x04,0x07}; //Alternative if phase order of input or drive is reversed
-
-//Phase lead to make motor spin
-const int8_t lead = 2;  //2 for forwards, -2 for backwards
 
 int orState = 0;
 
@@ -60,10 +65,16 @@ uint8_t hash[32];
 
 volatile uint64_t newKey;
 Mutex newKey_mutex;
+Mutex counter_mutex;
 
 //Speed and Torque Variables
-volatile uint32_t torque;
-int16_t counter;
+volatile int16_t counter;
+volatile float desiredSpeed = 30;
+volatile int32_t newTorque;
+
+volatile int32_t desiredRotation;
+volatile int32_t rotation = 0;
+
 
 //Status LED
 DigitalOut led1(LED1);
@@ -94,12 +105,13 @@ typedef enum {
     nonceFoundFirst, // First half of the nonce data
     nonceFoundSecond, // Second half of the nonce data
     hashRate,
-    velo
+    velo,
+    dbg
 } messageTypes;
 
-Thread commOutT;
-Thread commDecodeT;
-Thread calcVeloT; //Thread for calculating velocity
+Thread commOutT(osPriorityNormal, 1024);
+Thread commDecodeT(osPriorityNormal, 1024);
+Thread motorCtrlT(osPriorityNormal, 1024); //Thread for calculating velocity
 
 Queue<void, 8> inCharQ;
 
@@ -134,7 +146,10 @@ void commOutFn() {
                 pc.printf("Hash rate is: %d #/s\n\r", pMsg->data);
                 break;
             case velo:
-                pc.printf("Speed of motor is: %d rev/s\n\r", pMsg->data); //TODO IS THIS CORRECT?
+                pc.printf("Speed of motor is: %f rev/s\n\r", *(float*)&(pMsg->data)); //TODO IS THIS CORRECT?
+                break;
+            case dbg:
+                pc.printf("Debug Number: %d\n\r", pMsg->data);
                 break;
         }
         outMessages.free(pMsg);
@@ -154,37 +169,48 @@ void processCommand(uint8_t* command) {
             newKey_mutex.unlock();
             break;
         case 'R':
+            float rotationAmt;
+            sscanf((char*)command, "R%f", &rotationAmt);
+            // Rotate from the current position
+            desiredRotation = rotation + (rotationAmt * 6);
             break;
         case 'V':
-            break;
-        case 'T': //Set up for testing of setting the torque for the motor manually
-            sscanf((char*)command, "T%x", &torque);
+            sscanf((char*)command, "V%f", &desiredSpeed);
+            if (desiredSpeed == 0) {
+                desiredSpeed = 200; //very high
+            }
             break;
     }
 }
 
 void commDecodeFn() {
     pc.attach(&serialISR);
-    uint8_t commandArr[128];
+    uint8_t commandArr[MAXCOMMANDLEN];
     unsigned charNo = 0;
     while(1) {
         osEvent newEvent = inCharQ.get();
         uint8_t newChar = (uint8_t) newEvent.value.p;
-        if (newChar == '\r') {
-            commandArr[charNo] = '\0';
-            charNo = 0;
-            processCommand(commandArr);
-        }
-        else
-        {
-            commandArr[charNo++] = newChar;
+        if (newEvent.status != osOK) {
+            if (charNo >= MAXCOMMANDLEN) {
+                charNo = 0;
+            }
+            if (newChar == '\r') {
+                commandArr[charNo] = '\0';
+                charNo = 0;
+                processCommand(commandArr);
+            } else {
+                commandArr[charNo++] = newChar;
+            }
         }
     }
 }
 
 //Set a given drive state
 void motorOut(int8_t driveState, uint32_t t){
-
+    //limit PwmOut to 50% of the duty cycle
+    if (t > PERIOD/2){
+      t = PERIOD/2;
+    }
     //Lookup the output byte from the drive state.
     int8_t driveOut = driveTable[driveState & 0x07];
 
@@ -215,7 +241,7 @@ inline int8_t readRotorState(){
 //Basic synchronisation routine
 int8_t motorHome() {
     //Put the motor in drive state 0 and wait for it to stabilise
-    motorOut(0, 256);
+    motorOut(0, 1000);
     wait(2.0);
 
     //Get the rotor state
@@ -225,53 +251,103 @@ int8_t motorHome() {
 // Photointerruptor service routine
 void photoISR() {
     int8_t intState = 0;
-    int8_t intStateOld = 0;
-
+    static int8_t intStateOld = 0;
 
     intState = readRotorState();
 
-    if ((intState == 7 && intStateOld == 0) || (intState < intStateOld && !(intState == 0 && intStateOld == 7))) {
-      //We have to check for 'overflow' in the states
-      counter--;
-    }
-    else if (intState > intStateOld || (intState == 0 && intStateOld == 7)) {
-      //Same thing as before here
-      counter++;
+    int8_t lead = 2;
+    uint32_t torque;
+
+    int32_t newTorqueAtomic = newTorque;
+
+    if(newTorqueAtomic < 0){
+        lead = -2;
     }
 
-    if (intState != intStateOld) {
-        intStateOld = intState;
-        motorOut((intState-orState+lead+6)%6, torque); //+6 to make sure the remainder is positive
+   torque = abs(newTorqueAtomic);
+
+    torque = newTorqueAtomic;
+    if (newTorqueAtomic < 0) {
+        torque = 0;
+    }
+
+    motorOut((intState-orState+lead+6)%6, torque); //+6 to make sure the remainder is positive
+
+    int16_t newCounter = counter;
+    if (intState - intStateOld == 5) {
+        //We have to check for 'overflow' in the states
+        newCounter--;
+    } else if (intState - intStateOld == -5){
+        //Same thing as before here
+        newCounter++;
+    } else{
+        newCounter += (intState-intStateOld);
+    }
+
+    counter_mutex.lock();
+    counter = newCounter;
+    counter_mutex.unlock();
+
+    intStateOld = intState;
+}
+
+void sigMotorCtrl(){
+    motorCtrlT.signal_set(0x1);
+}
+
+void motorCtrl(){
+    Ticker t;
+    t.attach(&sigMotorCtrl, 0.1);
+
+    Timer diffTimer;
+    diffTimer.start();
+
+    uint8_t printCount = 0;
+
+    int32_t oldError = 0;
+
+    while(1){
+        motorCtrlT.signal_wait(0x1); //Wait for ticker to send signal to calculate speed.
+
+        uint32_t error = desiredRotation - rotation;
+
+        float speed = (float)counter/(diffTimer.read() * 6); //Multiply by 10 because of ticker and divide by 6 to get in revolutions.
+        float diffError = (error - oldError) / diffTimer.read();
+        diffTimer.reset();
+
+        rotation += counter;
+
+        counter_mutex.lock();
+        counter = 0;
+        counter_mutex.unlock();
+
+//        newTorque = Kp*(desiredSpeed - abs(speed));
+
+        newTorque = diffError * Krd + Krp * error;
+
+        oldError = error;
+
+        printCount++;
+
+        // Output speed via serial every second
+        if (printCount == 10) {
+            printCount = 0;
+            putMessage(velo, *(uint32_t*)&speed);
+            putMessage(dbg, rotation);
+        }
     }
 }
 
-void calcVelo(){
-  static uint8_t print;
-  while(1){
-    calcVeloT.signal_wait(0x1); //Wait for ticker to send signal to calculate speed.
-    //TODO Make more accurate counter (See spec) (And maybe make velo speed message average of last 10 readings?)
-    int16_t speed = counter*10/6; //Multiply by 10 because of ticker and divide by 6 to get in revolutions.
-    counter = 0;
-    print++;
-    if (print == 9){
-      print = 0;
-      putMessage(velo, int32_t(speed));
-    }
-  }
-}
-
-void sigCalcVelo(){
-  calcVeloT.signal_set(0x1);
-}
 
 //Main
 int main() {
     commOutT.start(commOutFn);
     commDecodeT.start(commDecodeFn);
-    calcVeloT.start(calcVelo);
-    L1L.period_us(2000);
-    L2L.period_us(2000);
-    L3L.period_us(2000);
+
+    L1L.period_us(PERIOD);
+    L2L.period_us(PERIOD);
+    L3L.period_us(PERIOD);
+
 
     counter = 0;
 
@@ -290,13 +366,13 @@ int main() {
     I3.rise(&photoISR);
     I3.fall(&photoISR);
 
+    motorCtrlT.start(motorCtrl);
+
     SHA256 sha;
     int numHashes = 0;
     Timer hashTimer;
 
     hashTimer.start();
-    Ticker t;
-    t.attach(&sigCalcVelo, 0.1);
 
     while (1) {
         newKey_mutex.lock();
@@ -310,9 +386,9 @@ int main() {
             // Successful hash
             putMessage(nonceFoundFirst, (uint32_t)(*nonce >> 32));
             putMessage(nonceFoundSecond, (uint32_t)(*nonce));
-        } else {
-            (*nonce)++;
+            (*nonce) = 0;
         }
+        (*nonce)++;
 
         if (hashTimer.read() > 1.0f) {
             putMessage(hashRate, numHashes);
