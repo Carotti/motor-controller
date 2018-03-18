@@ -22,16 +22,14 @@
 // PwmOut Period
 #define PERIOD 2000
 
-// Proportional constant for setting speed control
-<<<<<<< HEAD
-#define Kp 75
-#define Krp 5
-#define Krd 20
-=======
-#define Kp 25
+// Constants for setting velocity control
+#define kvp 125
+#define kvi 8
 
->>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
-#define MAXCOMMANDLEN 128
+#define MAXCOMMANDLEN 32
+
+#define MOTORUPDATEFREQ 10
+
 //Mapping from sequential drive states to motor phase outputs
 /*
 State   L1  L2  L3
@@ -71,26 +69,13 @@ uint8_t hash[32];
 volatile uint64_t newKey;
 Mutex newKey_mutex;
 Mutex counter_mutex;
-<<<<<<< HEAD
 
 //Speed and Torque Variables
-volatile int16_t counter;
 volatile float desiredSpeed = 30;
 volatile int32_t newTorque;
 
-volatile int32_t desiredRotation;
 volatile int32_t rotation = 0;
-
-=======
-Mutex torque_mutex;
-Mutex newTorque_mutex;
-
-//Speed and Torque Variables
-volatile uint32_t torque = 500;
-volatile int16_t counter;
-volatile uint16_t desiredSpeed;
-volatile float newTorque;
->>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
+volatile int32_t desiredRotation;
 
 //Status LED
 DigitalOut led1(LED1);
@@ -167,9 +152,6 @@ void commOutFn() {
             case dbg:
                 pc.printf("Debug Number: %d\n\r", pMsg->data);
                 break;
-            case dbg:
-                pc.printf("Debug Number: %d\n\r", pMsg->data);
-                break;
         }
         outMessages.free(pMsg);
     }
@@ -194,18 +176,10 @@ void processCommand(uint8_t* command) {
             desiredRotation = rotation + (rotationAmt * 6);
             break;
         case 'V':
-<<<<<<< HEAD
             sscanf((char*)command, "V%f", &desiredSpeed);
             if (desiredSpeed == 0) {
                 desiredSpeed = 200; //very high
             }
-=======
-            sscanf((char*)command, "V%d", &desiredSpeed);
-            break;
-        case 'T': //Set up for testing of setting the torque for the motor manually
-            sscanf((char*)command, "T%x", &torque);
-            putMessage(dbg, torque);
->>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
             break;
     }
 }
@@ -222,10 +196,6 @@ void commDecodeFn() {
                 charNo = 0;
             }
             if (newChar == '\r') {
-<<<<<<< HEAD
-=======
-                // putMessage(dbg, 69);
->>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
                 commandArr[charNo] = '\0';
                 charNo = 0;
                 processCommand(commandArr);
@@ -281,12 +251,24 @@ int8_t motorHome() {
 
 // Photointerruptor service routine
 void photoISR() {
-    int8_t intState = 0;
+    int8_t intState = readRotorState();
     static int8_t intStateOld = 0;
+    
+    int16_t newRotation = rotation;
+    if (intState - intStateOld == 5) {
+        //We have to check for 'overflow' in the states
+        newRotation--;
+    } else if (intState - intStateOld == -5){
+        //Same thing as before here
+        newRotation++;
+    } else{
+        newRotation += (intState - intStateOld);
+    }
 
-    intState = readRotorState();
+    rotation = newRotation;
 
-<<<<<<< HEAD
+    intStateOld = intState;
+
     int8_t lead = 2;
     uint32_t torque;
 
@@ -296,7 +278,7 @@ void photoISR() {
         lead = -2;
     }
 
-   torque = abs(newTorqueAtomic);
+    torque = abs(newTorqueAtomic);
 
     torque = newTorqueAtomic;
     if (newTorqueAtomic < 0) {
@@ -304,44 +286,6 @@ void photoISR() {
     }
 
     motorOut((intState-orState+lead+6)%6, torque); //+6 to make sure the remainder is positive
-
-    int16_t newCounter = counter;
-    if (intState - intStateOld == 5) {
-        //We have to check for 'overflow' in the states
-        newCounter--;
-    } else if (intState - intStateOld == -5){
-        //Same thing as before here
-        newCounter++;
-    } else{
-        newCounter += (intState-intStateOld);
-    }
-
-    counter_mutex.lock();
-    counter = newCounter;
-    counter_mutex.unlock();
-
-=======
-    motorOut((intState-orState+lead+6)%6, torque); //+6 to make sure the remainder is positive
-    /*
-    if(newTorque < 0){
-        lead = -2;
-        torque = abs(newTorque);
-    }
-
-    */
-
-    if (intState - intStateOld == 5) {
-        //We have to check for 'overflow' in the states
-        counter--;
-    } else if (intState - intStateOld == -5){
-        //Same thing as before here
-        counter++;
-    } else{
-        counter+=(intState-intStateOld);
-    }
-
->>>>>>> 4f2c3303d02a9809d0794041bb01e64e1a54963b
-    intStateOld = intState;
 }
 
 void sigMotorCtrl(){
@@ -350,44 +294,41 @@ void sigMotorCtrl(){
 
 void motorCtrl(){
     Ticker t;
-    t.attach(&sigMotorCtrl, 0.1);
-
+    t.attach(&sigMotorCtrl, 1.0 / MOTORUPDATEFREQ);
+        
     Timer diffTimer;
     diffTimer.start();
 
     uint8_t printCount = 0;
-
-    int32_t oldError = 0;
-
+        
+    int32_t oldRotation = rotation;
+    
+    float velocityErrorInt = 0;
+        
     while(1){
         motorCtrlT.signal_wait(0x1); //Wait for ticker to send signal to calculate speed.
-
-        uint32_t error = desiredRotation - rotation;
-
-        float speed = (float)counter/(diffTimer.read() * 6); //Multiply by 10 because of ticker and divide by 6 to get in revolutions.
-        float diffError = (error - oldError) / diffTimer.read();
+        
+        float deltaT = diffTimer.read();
         diffTimer.reset();
+        
+        float speed = (float)(rotation - oldRotation) / (deltaT * 6);
+        diffTimer.reset();
+        
+        float velocityError =  desiredSpeed - abs(speed);
+        
+        velocityErrorInt += velocityError * deltaT;
 
-        rotation += counter;
-
-        counter_mutex.lock();
-        counter = 0;
-        counter_mutex.unlock();
-
-//        newTorque = Kp*(desiredSpeed - abs(speed));
-
-        newTorque = diffError * Krd + Krp * error;
-
-        oldError = error;
-
+        newTorque = kvp*(velocityError) + kvi*velocityErrorInt;
+        
         printCount++;
-
         // Output speed via serial every second
-        if (printCount == 10) {
+        if (printCount == MOTORUPDATEFREQ) {
             printCount = 0;
             putMessage(velo, *(uint32_t*)&speed);
-            putMessage(dbg, rotation);
+            putMessage(dbg, rotation - oldRotation);
         }
+        
+        oldRotation = rotation;
     }
 }
 
@@ -400,9 +341,6 @@ int main() {
     L1L.period_us(PERIOD);
     L2L.period_us(PERIOD);
     L3L.period_us(PERIOD);
-
-
-    counter = 0;
 
     putMessage(hello, 0);
 
