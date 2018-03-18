@@ -23,8 +23,8 @@
 #define PERIOD 2000
 
 // Constants for setting velocity control
-#define kvp 125
-#define kvi 8
+#define kvp 90
+#define kvi 4
 
 #define MAXCOMMANDLEN 32
 
@@ -251,41 +251,27 @@ int8_t motorHome() {
 
 // Photointerruptor service routine
 void photoISR() {
-    int8_t intState = readRotorState();
-    static int8_t intStateOld = 0;
+    static int8_t intStateOld;
+    int8_t intState = readRotorState() - orState;
     
-    int16_t newRotation = rotation;
-    if (intState - intStateOld == 5) {
-        //We have to check for 'overflow' in the states
-        newRotation--;
-    } else if (intState - intStateOld == -5){
-        //Same thing as before here
-        newRotation++;
-    } else{
-        newRotation += (intState - intStateOld);
-    }
-
-    rotation = newRotation;
-
-    intStateOld = intState;
-
     int8_t lead = 2;
-    uint32_t torque;
+    
+    
+    float torque = newTorque; // atomic local copy
 
-    int32_t newTorqueAtomic = newTorque;
-
-    if(newTorqueAtomic < 0){
+    if(torque < 0){
         lead = -2;
     }
 
-    torque = abs(newTorqueAtomic);
+    torque = abs(torque);
 
-    torque = newTorqueAtomic;
-    if (newTorqueAtomic < 0) {
-        torque = 0;
-    }
-
-    motorOut((intState-orState+lead+6)%6, torque); //+6 to make sure the remainder is positive
+    motorOut((intState+lead+6)%6, (uint32_t)torque); //+6 to make sure the remainder is positive
+    
+    if (intState - intStateOld == 5) rotation--;
+    else if (intState - intStateOld == -5) rotation++;
+    else rotation += (intState - intStateOld);
+    
+    intStateOld = intState;
 }
 
 void sigMotorCtrl(){
@@ -325,7 +311,7 @@ void motorCtrl(){
         if (printCount == MOTORUPDATEFREQ) {
             printCount = 0;
             putMessage(velo, *(uint32_t*)&speed);
-            putMessage(dbg, rotation - oldRotation);
+            putMessage(dbg, rotation);
         }
         
         oldRotation = rotation;
@@ -348,7 +334,8 @@ int main() {
     orState = motorHome();
     putMessage(rotorOrigin, orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
-
+    
+        
     // Attach the photointerruptors to the service routine
     I1.rise(&photoISR);
     I1.fall(&photoISR);
