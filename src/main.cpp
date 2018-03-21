@@ -26,6 +26,10 @@
 #define kvp 150
 #define kvi 4
 
+// Constants for setting position contorl
+#define krp 50
+#define krd 20
+
 #define MAXCOMMANDLEN 32
 
 #define MOTORUPDATEFREQ 10
@@ -162,6 +166,73 @@ void serialISR() {
     inCharQ.put((void*)newChar);
 }
 
+//Set a given drive state
+void motorOut(int8_t driveState, uint32_t t){
+    //limit PwmOut to 50% of the duty cycle
+    if (t > PERIOD/2){
+      t = PERIOD/2;
+    }
+    //Lookup the output byte from the drive state.
+    int8_t driveOut = driveTable[driveState & 0x07];
+
+    //Turn off first
+    if (~driveOut & 0x01) L1L.pulsewidth_us(0);
+    if (~driveOut & 0x02) L1H = 1;
+    if (~driveOut & 0x04) L2L.pulsewidth_us(0);
+    if (~driveOut & 0x08) L2H = 1;
+    if (~driveOut & 0x10) L3L.pulsewidth_us(0);
+    if (~driveOut & 0x20) L3H = 1;
+
+    //Then turn on
+    if (driveOut & 0x01) L1L.pulsewidth_us(t);
+    if (driveOut & 0x02) L1H = 0;
+    if (driveOut & 0x04) L2L.pulsewidth_us(t);
+    if (driveOut & 0x08) L2H = 0;
+    if (driveOut & 0x10) L3L.pulsewidth_us(t);
+    if (driveOut & 0x20) L3H = 0;
+}
+
+//Convert photointerrupter inputs to a rotor state
+inline int8_t readRotorState(){
+    return stateMap[I1 + 2*I2 + 4*I3];
+}
+
+//Basic synchronisation routine
+int8_t motorHome() {
+    //Put the motor in drive state 0 and wait for it to stabilise
+    motorOut(0, 1000);
+    wait(2.0);
+
+    //Get the rotor state
+    return readRotorState();
+}
+
+// Photointerruptor service routine
+void photoISR() {
+    static int8_t intStateOld;
+    int8_t intState = readRotorState() - orState;
+    
+    int8_t lead = 2;
+    
+    
+    float torque = newTorque; // atomic local copy
+
+    if(torque < 0){
+        lead = -2;
+    }
+
+    torque = abs(torque);
+
+    motorOut((intState+lead+6)%6, (uint32_t)torque); //+6 to make sure the remainder is positive
+    
+    if (intState - intStateOld == 5) rotation--;
+    else if (intState - intStateOld == -5) rotation++;
+    else rotation += (intState - intStateOld);
+    
+    intStateOld = intState;
+}
+
+
 void processCommand(uint8_t* command) {
     putMessage(dbg, 69);
     switch (command[0]) {
@@ -207,76 +278,24 @@ void commDecodeFn() {
     }
 }
 
-//Set a given drive state
-void motorOut(int8_t driveState, uint32_t t){
-    //limit PwmOut to 50% of the duty cycle
-    if (t > PERIOD/2){
-      t = PERIOD/2;
-    }
-    //Lookup the output byte from the drive state.
-    int8_t driveOut = driveTable[driveState & 0x07];
-
-    //Turn off first
-    if (~driveOut & 0x01) L1L.pulsewidth_us(0);
-    if (~driveOut & 0x02) L1H = 1;
-    if (~driveOut & 0x04) L2L.pulsewidth_us(0);
-    if (~driveOut & 0x08) L2H = 1;
-    if (~driveOut & 0x10) L3L.pulsewidth_us(0);
-    if (~driveOut & 0x20) L3H = 1;
-
-    //Then turn on
-    if (driveOut & 0x01) L1L.pulsewidth_us(t);
-    if (driveOut & 0x02) L1H = 0;
-    if (driveOut & 0x04) L2L.pulsewidth_us(t);
-    if (driveOut & 0x08) L2H = 0;
-    if (driveOut & 0x10) L3L.pulsewidth_us(t);
-    if (driveOut & 0x20) L3H = 0;
-}
-
-int rotorState;
-
-//Convert photointerrupter inputs to a rotor state
-inline int8_t readRotorState(){
-    return stateMap[I1 + 2*I2 + 4*I3];
-}
-
-//Basic synchronisation routine
-int8_t motorHome() {
-    //Put the motor in drive state 0 and wait for it to stabilise
-    motorOut(0, 1000);
-    wait(2.0);
-
-    //Get the rotor state
-    return readRotorState();
-}
-
-// Photointerruptor service routine
-void photoISR() {
-    static int8_t intStateOld;
-    int8_t intState = readRotorState() - orState;
-    
-    int8_t lead = 2;
-    
-    
-    float torque = newTorque; // atomic local copy
-
-    if(torque < 0){
-        lead = -2;
-    }
-
-    torque = abs(torque);
-
-    motorOut((intState+lead+6)%6, (uint32_t)torque); //+6 to make sure the remainder is positive
-    
-    if (intState - intStateOld == 5) rotation--;
-    else if (intState - intStateOld == -5) rotation++;
-    else rotation += (intState - intStateOld);
-    
-    intStateOld = intState;
-}
-
 void sigMotorCtrl(){
     motorCtrlT.signal_set(0x1);
+}
+
+int32_t max(int32_t a, int32_t b) {
+    if (a > b) {
+        return a;
+    } else {
+        return b;
+    }   
+}
+
+int32_t min(int32_t a, int32_t b) {
+    if (a > b) {
+        return b;
+    } else {
+        return a;
+    }   
 }
 
 void motorCtrl(){
@@ -291,6 +310,8 @@ void motorCtrl(){
     int32_t oldRotation = rotation;
     
     float velocityErrorInt = 0;
+    
+    int32_t oldRotationError = 0;
         
     while(1){
         motorCtrlT.signal_wait(0x1); //Wait for ticker to send signal to calculate speed.
@@ -299,23 +320,37 @@ void motorCtrl(){
         diffTimer.reset();
         
         float speed = (float)(rotation - oldRotation) / (deltaT * 6);
-        diffTimer.reset();
         
         float velocityError =  desiredSpeed - abs(speed);
         
         velocityErrorInt += velocityError * deltaT;
+        
+        int32_t rotationError = desiredRotation - rotation;
+        
+        int32_t diffRotationError = (rotationError - oldRotationError) / deltaT;
 
-        newTorque = kvp*(velocityError) + kvi*velocityErrorInt;
+        int32_t velTorque = kvp*(velocityError) + kvi*velocityErrorInt;
+        velTorque *= rotationError > 0 ? 1 : -1;
+        
+        int32_t rotTorque = krp*rotationError + krd * diffRotationError;
+        
+        if (speed < 0) {
+            newTorque = max(velTorque, rotTorque);
+        } else {
+            newTorque = min(velTorque, rotTorque);
+        }
+        
+        putMessage(dbg, rotation);
         
         printCount++;
         // Output speed via serial every second
         if (printCount == MOTORUPDATEFREQ) {
             printCount = 0;
             putMessage(velo, *(uint32_t*)&speed);
-            putMessage(dbg, rotation);
         }
         
         oldRotation = rotation;
+        oldRotationError = rotationError;
     }
 }
 
