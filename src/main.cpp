@@ -23,7 +23,7 @@
 #define PERIOD 2000
 
 // Constants for setting velocity control
-#define kvp 90
+#define kvp 150
 #define kvi 4
 
 #define MAXCOMMANDLEN 32
@@ -163,6 +163,7 @@ void serialISR() {
 }
 
 void processCommand(uint8_t* command) {
+    putMessage(dbg, 69);
     switch (command[0]) {
         case 'K':
             newKey_mutex.lock();
@@ -185,7 +186,7 @@ void processCommand(uint8_t* command) {
 }
 
 void commDecodeFn() {
-    pc.attach(&serialISR);
+    pc.attach(&serialISR, RawSerial::RxIrq);
     uint8_t commandArr[MAXCOMMANDLEN];
     unsigned charNo = 0;
     while(1) {
