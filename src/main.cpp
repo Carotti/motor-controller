@@ -123,23 +123,17 @@ Queue<void, 8> inCharQ;
 RawSerial pc(SERIAL_TX, SERIAL_RX);
 
 void putMessage(uint8_t code, uint32_t data) {
-    outMessage_mutex.lock();
     message_t* msg = outMessages.alloc();
-    outMessage_mutex.unlock();
 
     msg->code = code;
     msg->data = data;
 
-    outMessage_mutex.lock();
     outMessages.put(msg);
-    outMessage_mutex.unlock();
 }
 
 void commOutFn() {
     while(1) {
-        outMessage_mutex.lock();
         osEvent newEvent = outMessages.get();
-        outMessage_mutex.unlock();
 
         message_t* pMsg = (message_t*) newEvent.value.p;
         switch(pMsg->code) {
@@ -166,9 +160,7 @@ void commOutFn() {
                 break;
         }
 
-        outMessage_mutex.lock();
         outMessages.free(pMsg);
-        outMessage_mutex.unlock();
     }
 }
 
