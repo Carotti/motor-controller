@@ -70,8 +70,6 @@ uint64_t* nonce = (uint64_t*)((int)sequence + 56); // LITTLE ENDIAN!!
 
 volatile uint64_t newKey;
 Mutex newKey_mutex;
-Mutex outMessage_mutex;
-
 
 //Speed and Torque Variables
 volatile float desiredSpeed = 30;
