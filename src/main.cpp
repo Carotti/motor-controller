@@ -347,7 +347,7 @@ void motorCtrl(){
         if (printCount == MOTORUPDATEFREQ) {
             printCount = 0;
             putMessage(velo, *(uint32_t*)&speed);
-             putMessage(dbg, rotation);
+            // putMessage(dbg, rotation);
         }
 
         oldRotation = rotation;
