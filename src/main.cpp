@@ -27,12 +27,12 @@
 #define kvi 4
 
 // Constants for setting position contorl
-#define krp 50
-#define krd 20
+#define krp 3
+#define krd 10
 
 #define MAXCOMMANDLEN 32
 
-#define MOTORUPDATEFREQ 10
+#define MOTORUPDATEFREQ 100
 
 //Mapping from sequential drive states to motor phase outputs
 /*
@@ -342,13 +342,12 @@ void motorCtrl(){
             newTorque = min(velTorque, rotTorque);
         }
 
-        // putMessage(dbg, rotation);
-
         printCount++;
         // Output speed via serial every second
         if (printCount == MOTORUPDATEFREQ) {
             printCount = 0;
             putMessage(velo, *(uint32_t*)&speed);
+             putMessage(dbg, rotation);
         }
 
         oldRotation = rotation;
