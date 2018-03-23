@@ -68,11 +68,10 @@ uint64_t* key = (uint64_t*)((int)sequence + 48);
 
 uint64_t* nonce = (uint64_t*)((int)sequence + 56); // LITTLE ENDIAN!!
 
-uint8_t hash[32];
-
 volatile uint64_t newKey;
 Mutex newKey_mutex;
-Mutex counter_mutex;
+Mutex outMessage_mutex;
+
 
 //Speed and Torque Variables
 volatile float desiredSpeed = 30;
@@ -124,15 +123,24 @@ Queue<void, 8> inCharQ;
 RawSerial pc(SERIAL_TX, SERIAL_RX);
 
 void putMessage(uint8_t code, uint32_t data) {
+    outMessage_mutex.lock();
     message_t* msg = outMessages.alloc();
+    outMessage_mutex.unlock();
+
     msg->code = code;
     msg->data = data;
+
+    outMessage_mutex.lock();
     outMessages.put(msg);
+    outMessage_mutex.unlock();
 }
 
 void commOutFn() {
     while(1) {
+        outMessage_mutex.lock();
         osEvent newEvent = outMessages.get();
+        outMessage_mutex.unlock();
+
         message_t* pMsg = (message_t*) newEvent.value.p;
         switch(pMsg->code) {
             case hello:
@@ -157,7 +165,10 @@ void commOutFn() {
                 pc.printf("Debug Number: %d\n\r", pMsg->data);
                 break;
         }
+
+        outMessage_mutex.lock();
         outMessages.free(pMsg);
+        outMessage_mutex.unlock();
     }
 }
 
@@ -211,10 +222,10 @@ int8_t motorHome() {
 void photoISR() {
     static int8_t intStateOld;
     int8_t intState = readRotorState() - orState;
-    
+
     int8_t lead = 2;
-    
-    
+
+
     float torque = newTorque; // atomic local copy
 
     if(torque < 0){
@@ -224,17 +235,16 @@ void photoISR() {
     torque = abs(torque);
 
     motorOut((intState+lead+6)%6, (uint32_t)torque); //+6 to make sure the remainder is positive
-    
+
     if (intState - intStateOld == 5) rotation--;
     else if (intState - intStateOld == -5) rotation++;
     else rotation += (intState - intStateOld);
-    
+
     intStateOld = intState;
 }
 
 
 void processCommand(uint8_t* command) {
-    putMessage(dbg, 69);
     switch (command[0]) {
         case 'K':
             newKey_mutex.lock();
@@ -287,7 +297,7 @@ int32_t max(int32_t a, int32_t b) {
         return a;
     } else {
         return b;
-    }   
+    }
 }
 
 int32_t min(int32_t a, int32_t b) {
@@ -295,60 +305,60 @@ int32_t min(int32_t a, int32_t b) {
         return b;
     } else {
         return a;
-    }   
+    }
 }
 
 void motorCtrl(){
     Ticker t;
     t.attach(&sigMotorCtrl, 1.0 / MOTORUPDATEFREQ);
-        
+
     Timer diffTimer;
     diffTimer.start();
 
     uint8_t printCount = 0;
-        
+
     int32_t oldRotation = rotation;
-    
+
     float velocityErrorInt = 0;
-    
+
     int32_t oldRotationError = 0;
-        
+
     while(1){
         motorCtrlT.signal_wait(0x1); //Wait for ticker to send signal to calculate speed.
-        
+
         float deltaT = diffTimer.read();
         diffTimer.reset();
-        
+
         float speed = (float)(rotation - oldRotation) / (deltaT * 6);
-        
+
         float velocityError =  desiredSpeed - abs(speed);
-        
+
         velocityErrorInt += velocityError * deltaT;
-        
+
         int32_t rotationError = desiredRotation - rotation;
-        
+
         int32_t diffRotationError = (rotationError - oldRotationError) / deltaT;
 
         int32_t velTorque = kvp*(velocityError) + kvi*velocityErrorInt;
         velTorque *= rotationError > 0 ? 1 : -1;
-        
+
         int32_t rotTorque = krp*rotationError + krd * diffRotationError;
-        
+
         if (speed < 0) {
             newTorque = max(velTorque, rotTorque);
         } else {
             newTorque = min(velTorque, rotTorque);
         }
-        
-        putMessage(dbg, rotation);
-        
+
+        // putMessage(dbg, rotation);
+
         printCount++;
         // Output speed via serial every second
         if (printCount == MOTORUPDATEFREQ) {
             printCount = 0;
             putMessage(velo, *(uint32_t*)&speed);
         }
-        
+
         oldRotation = rotation;
         oldRotationError = rotationError;
     }
@@ -370,8 +380,8 @@ int main() {
     orState = motorHome();
     putMessage(rotorOrigin, orState);
     //orState is subtracted from future rotor state inputs to align rotor and motor states
-    
-        
+
+
     // Attach the photointerruptors to the service routine
     I1.rise(&photoISR);
     I1.fall(&photoISR);
@@ -383,6 +393,7 @@ int main() {
     motorCtrlT.start(motorCtrl);
 
     SHA256 sha;
+    uint8_t hash[32];
     int numHashes = 0;
     Timer hashTimer;
 
